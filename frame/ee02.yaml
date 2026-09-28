@@ -1,0 +1,280 @@
+# EE02 art frame: wake every few minutes, ask the server whether there is a new picture,
+# draw it if there is, sleep. The server says how long to sleep, so the night schedule lives in daily_art.py.
+# Press KEY1 to wake it and keep it awake for 10 minutes, then flash over wifi: esphome run ee02.yaml --device art-frame.local
+# Press KEY2 to wake it and swap today's painting for another one.
+# Settings come from .env at the root of the repo, see .env.example. Build with `make frame-upload`.
+
+substitutions:
+  server: !env_var FRAME_SERVER # the computer running daily_art.py, like http://192.168.1.10:8765
+  image_url: ${server}/today.png
+  next_url: ${server}/next.png # picks a new painting, then serves it like today.png
+  pending_url: ${server}/pending # answers the seconds to sleep, 0 means fetch today.png now
+  poll: !env_var FRAME_POLL 600 # seconds of sleep after drawing, daily_art.py reads the same value
+  rotation: !env_var FRAME_ROTATION 270 # frame hangs landscape; 90 turns it the other way up
+  battery_multiply: !env_var FRAME_BATTERY_MULTIPLY 2.07
+
+esphome:
+  name: !env_var FRAME_NAME art-frame
+  # ext1 wakeup sets no sleep pull-ups the way a single wakeup_pin does, so hold
+  # both keys up here, right before the board sleeps. Floating pins would wake it at once.
+  on_shutdown:
+    then:
+      - lambda: |-
+          for (auto pin : {GPIO_NUM_2, GPIO_NUM_3}) {
+            gpio_sleep_set_direction(pin, GPIO_MODE_INPUT);
+            gpio_sleep_set_pull_mode(pin, GPIO_PULLUP_ONLY);
+            gpio_hold_en(pin);
+          }
+  on_boot:
+    priority: -100
+    then:
+      - wait_until:
+          condition:
+            wifi.connected:
+          timeout: 20s # a check normally joins in about a second, this caps what a dead router costs
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - if:
+                condition:
+                  lambda: "return id(fetch_now);"
+                then:
+                  - script.execute: draw
+                else:
+                  - script.execute: check
+          else:
+            - logger.log: "no wifi, retry in an hour"
+            - if:
+                condition:
+                  not:
+                    script.is_running: stay_awake
+                then:
+                  - deep_sleep.enter:
+                      id: sleeper
+                      sleep_duration: 1h
+
+esp32:
+  board: esp32-s3-devkitc-1
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+wifi:
+  ssid: !env_var FRAME_WIFI_SSID
+  password: !env_var FRAME_WIFI_PASSWORD
+  # Joining wifi is what a check costs. A fixed address skips DHCP and fast_connect
+  # skips the scan by joining the access point it used last time.
+  fast_connect: true
+  manual_ip:
+    static_ip: !env_var FRAME_IP # reserve it in the router, outside the DHCP pool
+    gateway: !env_var FRAME_GATEWAY
+    subnet: !env_var FRAME_SUBNET 255.255.255.0
+
+logger:
+
+ota:
+  - platform: esphome
+
+binary_sensor:
+  - platform: gpio
+    id: key1
+    pin:
+      number: GPIO2
+      inverted: true
+      mode: INPUT_PULLUP
+      allow_other_uses: true
+    on_press:
+      - script.execute: stay_awake
+  - platform: gpio
+    id: key2
+    pin:
+      number: GPIO3
+      inverted: true
+      mode: INPUT_PULLUP
+      allow_other_uses: true
+    on_press:
+      - logger.log: "KEY2, fetching another painting"
+      - online_image.set_url:
+          id: art
+          url: ${next_url}
+
+globals:
+  - id: fetch_now # a key woke the board, draw without asking the server first
+    type: bool
+    initial_value: "false"
+
+script:
+  # One short GET per wake. Wifi is the whole cost of a check, so it does nothing else.
+  - id: check
+    then:
+      - http_request.get:
+          url: ${pending_url}
+          capture_response: true
+          on_response:
+            - if:
+                condition:
+                  lambda: "return response->status_code == 200 && strtoul(body.c_str(), nullptr, 10) == 0;"
+                then:
+                  - script.execute: draw
+                else:
+                  - if:
+                      condition:
+                        not:
+                          script.is_running: stay_awake
+                      then:
+                        - deep_sleep.enter:
+                            id: sleeper
+                            # anything but a number from the server sleeps an hour
+                            sleep_duration: !lambda |-
+                              uint32_t s = response->status_code == 200 ? strtoul(body.c_str(), nullptr, 10) : 0;
+                              return (s >= 60 ? s : 3600) * 1000;
+          on_error:
+            - logger.log: "check failed, retry in an hour"
+            - if:
+                condition:
+                  not:
+                    script.is_running: stay_awake
+                then:
+                  - deep_sleep.enter:
+                      id: sleeper
+                      sleep_duration: 1h
+
+  - id: draw
+    then:
+      - script.execute: read_battery
+      - component.update: art
+
+# The battery sits behind a divider on GPIO1 that GPIO6 switches on, so reading it
+# costs nothing while asleep. The server shows the last value on the web app.
+  - id: read_battery
+    then:
+      - switch.turn_on: adc_divider
+      - delay: 20ms
+      - component.update: battery
+      - switch.turn_off: adc_divider
+      - http_request.get:
+          url: !lambda |-
+            return "${server}/board?v=" + esphome::to_string(id(battery).state);
+          capture_response: false
+          on_error:
+            - logger.log: "battery report failed"
+
+  # KEY1 keeps the board awake for 10 minutes, long enough to flash it over wifi.
+  # Pressing it again restarts the 10 minutes. Every sleep checks this script first,
+  # since deep_sleep.enter ignores deep_sleep.prevent.
+  - id: stay_awake
+    mode: restart
+    then:
+      - logger.log: "KEY1, staying awake for 10 minutes"
+      - delay: 10min
+      - logger.log: "awake time over, back to checking"
+      - deep_sleep.enter:
+          id: sleeper
+          sleep_duration: ${poll}s
+
+switch:
+  - platform: gpio
+    id: adc_divider
+    pin: GPIO6
+    restore_mode: ALWAYS_OFF
+
+sensor:
+  - platform: adc
+    id: battery
+    pin: GPIO1
+    attenuation: 12db
+    samples: 16
+    update_interval: never
+    filters:
+      # the divider on the board; 2.31 read 4.68 V on a full pack, scaled so full is 4.20 V
+      - multiply: ${battery_multiply}
+
+deep_sleep:
+  id: sleeper
+  esp32_ext1_wakeup:
+    mode: ANY_LOW
+    pins:
+      - pin:
+          number: GPIO2
+          allow_other_uses: true
+        on_wake:
+          - globals.set:
+              id: fetch_now
+              value: "true"
+          - script.execute: stay_awake
+      - pin:
+          number: GPIO3
+          allow_other_uses: true
+        on_wake:
+          - logger.log: "woken by KEY2, fetching another painting"
+          - globals.set:
+              id: fetch_now
+              value: "true"
+          - online_image.set_url:
+              id: art
+              url: ${next_url}
+              update: false # on_boot fetches it once wifi is up
+
+http_request:
+  timeout: 180s # /next.png picks and converts a painting first, that takes a minute or two
+
+online_image:
+  - id: art
+    url: ${image_url}
+    format: PNG
+    type: RGB565
+    update_interval: never
+    on_download_finished:
+      - component.update: epd
+      - delay: 1s
+      - wait_until:
+          condition:
+            lambda: "return !id(epd).is_processing();"
+          timeout: 120s
+      - logger.log: "refresh done"
+      - if:
+          condition:
+            not:
+              script.is_running: stay_awake
+          then:
+            - deep_sleep.enter:
+                id: sleeper
+                sleep_duration: ${poll}s
+    on_error:
+      - logger.log: "download failed, retry in an hour"
+      - if:
+          condition:
+            not:
+              script.is_running: stay_awake
+          then:
+            - deep_sleep.enter:
+                id: sleeper
+                sleep_duration: 1h
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/philippwaller/esphome-epaper-spectra6-133
+      ref: v0.5.0
+
+display:
+  - platform: epaper_spectra6_133
+    id: epd
+    update_interval: never
+    rotation: ${rotation}
+    power_off_after_sleep: true
+    cs0_pin: "44"
+    cs1_pin: "41"
+    clk_pin: "7"
+    data0_pin: "9"
+    data1_pin: "8"
+    busy_pin: "4"
+    reset_pin: "38"
+    power_pin: "43"
+    lambda: |-
+      it.image(0, 0, id(art));

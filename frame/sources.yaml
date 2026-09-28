@@ -1,0 +1,68 @@
+# Where the frame's paintings come from. Every pick draws one source at random,
+# weighted, and then a random painting from that source. The file is read on every
+# pick, so an edit applies to the next painting without a restart. Check an edit
+# with `uv run daily_art.py try`, it shows one pick from every source.
+#
+# api        met, aic (Art Institute of Chicago) or cleveland
+# weight     how often this source is drawn next to the others, 0 turns it off
+# query      handed to that museum's search as is, see the link above each source
+#
+# Only landscape paintings are shown, whatever the query says. The frame hangs landscape.
+
+# Skip paintings duller than this, whatever the source. The panel makes a muted
+# painting look bleaker still. Grey is 0, ink wash on beige paper about 18, a grey
+# Cazin landscape 24, a Monet water lily pond 27, Warhol's Liz 29, Nighthawks 41,
+# a Lichtenstein 68. The log and `try` show the score of every pick, raise it for more pop.
+min_colourfulness: 25
+
+# The panel is 4:3 and spectra6 crops to fill it, so a painting of another shape
+# loses its edges. Skip anything that would lose more than this share. 0.15 keeps
+# shapes between about 1.13:1 and 1.57:1. A square painting would lose 0.25 of its
+# height, a 16:9 one 0.25 of its width, a long handscroll far more.
+max_crop: 0.15
+
+sources:
+  # https://metmuseum.github.io/#search
+  # medium is the kind of object here, not the material. departmentId narrows it,
+  # 11 is European Paintings, 21 Modern Art. dateBegin and dateEnd go together.
+  # The Met has no images of anything still under copyright.
+  - name: Met paintings
+    api: met
+    weight: 2
+    query:
+      hasImages: true
+      medium: Paintings
+      q: "*"
+
+  # https://api.artic.edu/docs/#search, an Elasticsearch query.
+  # Serves copyrighted work too, but at 843 pixels wide, about half the panel.
+  - name: Art Institute paintings
+    api: aic
+    weight: 1
+    query:
+      bool:
+        must:
+          - term: { classification_titles.keyword: painting }
+          - exists: { field: image_id }
+
+  # Warhol, Lichtenstein, Hockney and so on. Includes their prints, not only paintings.
+  # Other styles the Art Institute tags: Impressionism, Cubism, Modernism, Surrealism,
+  # Abstract Expressionism, contemporary.
+  - name: Pop art
+    api: aic
+    weight: 2
+    query:
+      bool:
+        must:
+          - term: { style_titles.keyword: Pop Art }
+          - exists: { field: image_id }
+
+  # https://openaccess-api.clevelandart.org/
+  # created_after and created_before take a year, department a name like "Modern European Painting and Sculpture".
+  - name: Cleveland paintings
+    api: cleveland
+    weight: 1
+    query:
+      type: Painting
+      cc0: 1
+      has_image: 1

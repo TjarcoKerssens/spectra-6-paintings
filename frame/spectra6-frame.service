@@ -1,0 +1,14 @@
+# systemd user unit for daily_art.py on Linux, see frame/README.md.
+[Unit]
+Description=spectra6 art frame server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/env uv run --script __DIR__/daily_art.py
+Environment=PATH=__HOME__/bin:__HOME__/.local/bin:__HOME__/go/bin:/usr/local/bin:/usr/bin:/bin
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

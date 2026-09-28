@@ -1,0 +1,11 @@
+bin/
+epaper/
+coverage.out
+*.bmp
+spectra6_patches.png
+.DS_Store
+.env
+frame/.esphome/
+__pycache__/
+frame/backup/
+frame/secrets.yaml
