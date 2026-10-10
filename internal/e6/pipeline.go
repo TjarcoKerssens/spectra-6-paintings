@@ -50,6 +50,7 @@ type Params struct {
 	Serpentine    bool
 	Sat           float64  // scales the computed per hue boost, 0 disables it
 	MaxGain       float64  // ceiling on any one hue's boost
+	Vivid         float64  // flat chroma multiplier after tone compression, 1 leaves it
 	TargetPct     float64  // which chroma percentile is aimed at the gamut edge
 	Sharp         float64  // unsharp amount
 	Shadows       *float64 // nil means take the analyser's suggestion
@@ -69,6 +70,7 @@ func Defaults() Params {
 		Serpentine: true,
 		Sat:        1.0,
 		MaxGain:    1.6,
+		Vivid:      1.15,
 		TargetPct:  90,
 		Sharp:      0.6,
 		Tone:       Strength{Auto: true},
@@ -110,7 +112,7 @@ func AnalyseImage(fitted image.Image, p Palette, prm Params) ([]float64, Report)
 //
 // Order matters and it is the order the reference implementation settled on:
 // chroma shaping, then sharpening, then the tonal S curve, then dynamic range,
-// then gamut, then dither. Chroma first because everything after it depends on
+// then the vivid push, then gamut, then dither. Chroma first because everything after it depends on
 // where the colours ended up. Gamut last because it is the safety net that
 // catches whatever the earlier steps pushed out of reach.
 func Convert(fitted image.Image, p Palette, prm Params, gains []float64, rep Report) Result {
@@ -134,6 +136,17 @@ func Convert(fitted image.Image, p Palette, prm Params, gains []float64, rep Rep
 			AutoCompressDynamicRange(f, p)
 		case prm.Tone.Value > 0:
 			CompressDynamicRange(f, p, prm.Tone.Value)
+		}
+		// The per hue boost only aims at the gamut edge, so a colourful image gets
+		// nothing and dithers out paler than it looks on a screen. A flat extra
+		// push, eased in above the neutral floor so greys and white clouds stay
+		// clean, makes it read as vivid on the wall.
+		if prm.Vivid != 1 {
+			vivid := make([]float64, HueBins)
+			for i := range vivid {
+				vivid[i] = prm.Vivid
+			}
+			ApplyGains(f, vivid)
 		}
 	}
 	switch {
