@@ -63,6 +63,26 @@ func ShadowsHighlights(f *Frame, shadows, highlights float64) {
 	})
 }
 
+// scaleKeepChroma scales a pixel's light by s but keeps its OkLab chroma.
+//
+// Scaling linear RGB alone shrinks chroma along with lightness, roughly by the
+// cube root of s. Squeezing a bright image into the panel's narrow range then
+// leaves every colour paler than it started, which reads as washed out. Keeping
+// a and b puts the colour back, and gamut compression later folds in whatever
+// the panel cannot make.
+func scaleKeepChroma(p *[3]float64, s float64) {
+	c := LinearToOkLab(p[0], p[1], p[2])
+	for k := 0; k < 3; k++ {
+		p[k] = clamp(p[k]*s, 0, 1)
+	}
+	d := LinearToOkLab(p[0], p[1], p[2])
+	d.A, d.B = c.A, c.B
+	out := OkLabToLinear(d)
+	for k := 0; k < 3; k++ {
+		p[k] = clamp(out[k], 0, 1)
+	}
+}
+
 // scaleDark handles pixels too dark to divide by, preserving their channel ratios
 // instead of letting a target/current scale explode.
 func scaleDark(p *[3]float64, targetY float64) {
@@ -114,10 +134,7 @@ func CompressDynamicRange(f *Frame, p Palette, strength float64) {
 		y := Luminance(*px)
 		target := y + strength*((blackY+y*span)-y)
 		if y > 1e-6 {
-			s := clamp(target/y, 0, 1e6)
-			for k := 0; k < 3; k++ {
-				px[k] = clamp(px[k]*s, 0, 1)
-			}
+			scaleKeepChroma(px, clamp(target/y, 0, 1e6))
 			return
 		}
 		scaleDark(px, blackY*strength)
@@ -174,6 +191,16 @@ func AutoCompressDynamicRange(f *Frame, p Palette) {
 			strength = math.Pow(skew, 1.4)
 		}
 	}
+	// The skew reads a high key image as needing little compression, yet most of
+	// it sits above panel white, where the dither can only print flat white. The
+	// share of pixels up there sets a floor, so a bright sky keeps its colour.
+	var over int
+	for _, y := range lum {
+		if y > whiteY {
+			over++
+		}
+	}
+	strength = math.Max(strength, float64(over)/float64(len(lum)))
 
 	f.each(func(px *[3]float64) {
 		y := Luminance(*px)
@@ -182,10 +209,7 @@ func AutoCompressDynamicRange(f *Frame, p Palette) {
 		norm := clamp((y-pLow)/imageRange, 0, 1)
 		target := y + strength*((blackY+norm*span)-y)
 		if y > 1e-6 {
-			s := clamp(target/y, 0, 1e6)
-			for k := 0; k < 3; k++ {
-				px[k] = clamp(px[k]*s, 0, 1)
-			}
+			scaleKeepChroma(px, clamp(target/y, 0, 1e6))
 			return
 		}
 		scaleDark(px, target)

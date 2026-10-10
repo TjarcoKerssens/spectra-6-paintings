@@ -543,3 +543,19 @@ func TestSaveBMPWrites24Bit(t *testing.T) {
 		t.Fatalf("BMP was written at %d bits per pixel, wanted 24", bpp)
 	}
 }
+
+// Regression: a bright image reads as needing almost no compression by its log
+// average, so its sky stayed above panel white and printed as flat white.
+func TestAutoToneBringsHighKeyImagesIntoRange(t *testing.T) {
+	lin := Measured.Linear()
+	white := Luminance(lin[White])
+	f := NewFrame(100, 1)
+	for i := range f.Px {
+		v := 0.6 + 0.4*float64(i)/99
+		f.Px[i] = [3]float64{v, v, v}
+	}
+	AutoCompressDynamicRange(f, Measured)
+	if y := Luminance(f.Px[50]); y > white {
+		t.Fatalf("mid pixel stayed above panel white, %.3f > %.3f", y, white)
+	}
+}
