@@ -30,6 +30,7 @@ import math
 import os
 import random
 import re
+import secrets
 import shutil
 import statistics
 import subprocess
@@ -66,6 +67,9 @@ ORIGINAL = os.path.join(STATE, "original.jpg")  # the painting as it is, for the
 BOARD = os.path.join(STATE, "board.json")  # what the board told us when it last woke
 PENDING = os.path.join(STATE, "pending")  # exists while the web app has a picture the board has not drawn
 FETCHED = os.path.join(STATE, "fetched")  # touched when the board pulls the image, only its mtime counts
+FAVORITES = os.path.join(STATE, "favorites")  # one folder per favorite, the ink version, the original and its label
+FAVORITE_ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{4}")
+FAVORITE_FILES = {"thumb.jpg": "image/jpeg", "original.jpg": "image/jpeg", "frame.png": "image/png"}
 APP = os.path.join(HERE, "app.html")
 CONFIG = os.path.join(HERE, "sources.yaml")
 ICONS = {"/icon.svg": "image/svg+xml", "/apple-touch-icon.png": "image/png",
@@ -256,16 +260,36 @@ def pick(tmp, source=None):
     raise RuntimeError(f"no colourful landscape painting that fits found in 40 tries from {source['name']}")
 
 
-def install(tmp, src, meta, flags=()):
-    """Convert src for the panel and make it today's picture."""
+def convert(tmp, src, flags=()):
+    """Run src through spectra6 and return the path of the panel image."""
     # spectra6 sees a landscape source and writes 1600x1200, the board rotates it onto the panel
     subprocess.run([SPECTRA6, "-batch", *flags, "-out", tmp + "/out", src], check=True, capture_output=True)
-    out = os.path.join(tmp, "out", os.listdir(os.path.join(tmp, "out"))[0])
-    shutil.move(out, TODAY)
-    # the web app shows the painting itself, not the version bent onto six inks
+    return os.path.join(tmp, "out", os.listdir(os.path.join(tmp, "out"))[0])
+
+
+def shrink(src, dest, size):
     with Image.open(src) as im:
-        im.thumbnail((1600, 1600))
-        im.convert("RGB").save(ORIGINAL, quality=90)
+        im.thumbnail((size, size))
+        im.convert("RGB").save(dest, quality=90)
+
+
+def install(tmp, src, meta, flags=()):
+    """Convert src for the panel and make it today's picture."""
+    shutil.move(convert(tmp, src, flags), TODAY)
+    # the web app shows the painting itself, not the version bent onto six inks
+    shrink(src, ORIGINAL, 1600)
+    write_meta(meta)
+
+
+def read_meta():
+    try:
+        with open(os.path.join(STATE, "today.json")) as f:
+            return json.load(f)
+    except OSError:
+        return {}
+
+
+def write_meta(meta):
     with open(os.path.join(STATE, "today.json"), "w") as f:
         json.dump(meta, f, indent=2)
 
@@ -280,20 +304,99 @@ def refresh():
         f"colourfulness {meta['colourfulness']}")
 
 
-def upload(data, name):
-    """Make an uploaded picture today's, whatever its shape."""
+def from_upload(tmp, data):
+    """Write an uploaded picture out as a JPEG spectra6 can read, with the flags its shape needs."""
+    raw, src = os.path.join(tmp, "upload"), os.path.join(tmp, "source.jpg")
+    with open(raw, "wb") as f:
+        f.write(data)
+    with Image.open(raw) as im:  # fails on anything that is not an image
+        ImageOps.exif_transpose(im).convert("RGB").save(src, quality=95)  # spectra6 ignores EXIF rotation
+    w, h, _ = look(src)
+    # the frame hangs landscape, so a portrait picture is letterboxed onto it instead of cropped to a strip
+    return src, () if w > h else ("-size", "1600x1200", "-contain")
+
+
+def upload(data, name, favorite=False):
+    """Make an uploaded picture today's, whatever its shape, or only keep it as a favorite."""
     title = os.path.splitext(name)[0] or "Upload"
+    meta = {"title": title, "source": "upload", "collection": "Upload"}
+    if favorite:
+        # this leaves today alone, so it needs no lock and the board is not kept waiting
+        with tempfile.TemporaryDirectory() as tmp:
+            src, flags = from_upload(tmp, data)
+            keep(convert(tmp, src, flags), src, meta)
+        log(f"uploaded {title} to the favorites")
+        return
     with lock, tempfile.TemporaryDirectory() as tmp:
-        raw, src = os.path.join(tmp, "upload"), os.path.join(tmp, "source.jpg")
-        with open(raw, "wb") as f:
-            f.write(data)
-        with Image.open(raw) as im:  # fails on anything that is not an image
-            ImageOps.exif_transpose(im).convert("RGB").save(src, quality=95)  # spectra6 ignores EXIF rotation
-        w, h, _ = look(src)
-        # the frame hangs landscape, so a portrait picture is letterboxed onto it instead of cropped to a strip
-        install(tmp, src, {"title": title, "source": "upload", "collection": "Upload"},
-                () if w > h else ("-size", "1600x1200", "-contain"))
+        src, flags = from_upload(tmp, data)
+        install(tmp, src, meta, flags)
     log(f"uploaded {title}")
+
+
+def keep(frame, original, meta):
+    """Save a favorite, the panel image as it is and the original for the gallery. Returns its id."""
+    now = datetime.datetime.now()
+    fid = f"{now:%Y%m%d-%H%M%S}-{secrets.token_hex(2)}"
+    folder = os.path.join(FAVORITES, fid)
+    os.makedirs(folder)
+    shutil.copyfile(frame, os.path.join(folder, "frame.png"))
+    shrink(original, os.path.join(folder, "original.jpg"), 1600)
+    shrink(original, os.path.join(folder, "thumb.jpg"), 480)
+    meta = {k: v for k, v in meta.items() if k != "favorite"}
+    with open(os.path.join(folder, "meta.json"), "w") as f:
+        json.dump({**meta, "id": fid, "added": now.isoformat()}, f, indent=2)
+    return fid
+
+
+def favorite_today():
+    """Keep what is on the frame now. Today's label remembers it, so the web app shows it as kept."""
+    with lock:
+        if not os.path.exists(TODAY):
+            raise RuntimeError("nothing on the frame yet")
+        meta = read_meta()
+        if current_favorite(meta):
+            return meta["favorite"]
+        fid = keep(TODAY, ORIGINAL if os.path.exists(ORIGINAL) else TODAY, meta)
+        write_meta({**meta, "favorite": fid})
+    log(f"kept {meta.get('title') or 'the picture'} as a favorite")
+    return fid
+
+
+def show_favorite(fid):
+    """Put a favorite back on the frame. It was converted when it was kept, so this is only a copy."""
+    folder = os.path.join(FAVORITES, fid)
+    with lock:
+        with open(os.path.join(folder, "meta.json")) as f:
+            meta = json.load(f)
+        shutil.copyfile(os.path.join(folder, "frame.png"), TODAY)  # a fresh mtime, so it counts as today's
+        shutil.copyfile(os.path.join(folder, "original.jpg"), ORIGINAL)
+        write_meta({**{k: v for k, v in meta.items() if k not in ("id", "added")}, "favorite": fid})
+    log(f"favorite {meta.get('title') or fid} back on the frame")
+
+
+def forget_favorite(fid):
+    with lock:
+        shutil.rmtree(os.path.join(FAVORITES, fid))
+    log(f"removed favorite {fid}")
+
+
+def current_favorite(meta):
+    """The id of the favorite on the frame, if it is one and still kept."""
+    fid = meta.get("favorite")
+    return fid if fid and os.path.isdir(os.path.join(FAVORITES, fid)) else None
+
+
+def favorites():
+    """Every favorite's label, newest first. The ids start with the time, so they sort by it."""
+    found = []
+    for fid in sorted(os.listdir(FAVORITES) if os.path.isdir(FAVORITES) else [], reverse=True):
+        try:
+            with open(os.path.join(FAVORITES, fid, "meta.json")) as f:
+                meta = json.load(f)
+        except (OSError, ValueError):
+            continue  # a half written folder, or something that is not a favorite
+        found.append({k: meta.get(k) for k in ("id", "title", "artistDisplayName", "objectDate", "collection", "added")})
+    return found
 
 
 def ensure_today(force=False):
@@ -366,16 +469,12 @@ def log(msg):
 
 def status():
     """Everything the web app shows, in one response."""
-    meta = {}
-    try:
-        with open(os.path.join(STATE, "today.json")) as f:
-            meta = json.load(f)
-    except OSError:
-        pass
-    keep = ("title", "artistDisplayName", "artistDisplayBio", "objectDate", "medium",
+    meta = read_meta()
+    fields = ("title", "artistDisplayName", "artistDisplayBio", "objectDate", "medium",
             "dimensions", "culture", "department", "creditLine", "objectURL", "tags", "about", "collection")
     return {
-        **{k: meta.get(k) for k in keep},
+        **{k: meta.get(k) for k in fields},
+        "favorite": current_favorite(meta),
         "picked": iso(TODAY),
         "battery": battery(),
         "last_fetch": iso(FETCHED),
@@ -409,6 +508,15 @@ class Handler(BaseHTTPRequestHandler):
             return self.pending()
         if path == "/status":
             return self.send(json.dumps(status()).encode(), "application/json")
+        if path == "/favorites":
+            return self.send(json.dumps(favorites()).encode(), "application/json")
+        if m := re.fullmatch(r"/favorites/([^/]+)/([^/]+)", path):
+            fid, name = m.groups()
+            file = os.path.join(FAVORITES, fid, name)
+            if not FAVORITE_ID.fullmatch(fid) or name not in FAVORITE_FILES or not os.path.exists(file):
+                return self.send_error(404)
+            with open(file, "rb") as f:
+                return self.send(f.read(), FAVORITE_FILES[name], cache=True)  # a favorite never changes
         if path == "/original.jpg":
             if not os.path.exists(ORIGINAL):
                 return self.send_error(404)
@@ -429,7 +537,7 @@ class Handler(BaseHTTPRequestHandler):
                 os.remove(PENDING)
 
     def do_POST(self):
-        """The web app's buttons. Both answer once the picture is ready, the board draws it on its next check."""
+        """The web app's buttons. Each answers once the picture is ready, the board draws it on its next check."""
         path = self.path.split("?")[0]
         if path == "/random":
             log("another painting asked for from the web app")
@@ -444,10 +552,44 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 log(f"upload failed: {e}")
                 return self.send_error(400, "could not use that image")
+        elif path == "/favorite":
+            try:
+                favorite_today()
+            except Exception as e:
+                log(f"keeping a favorite failed: {e}")
+                return self.send_error(500, "could not keep this one")
+            return self.send(json.dumps(status()).encode(), "application/json")
+        elif path == "/favorites/upload":
+            size = int(self.headers.get("Content-Length") or 0)
+            if not 0 < size <= MAX_UPLOAD_MB << 20:
+                return self.send_error(413, f"pick an image under {MAX_UPLOAD_MB} MB")
+            try:
+                upload(self.rfile.read(size), urllib.parse.unquote(self.headers.get("X-Filename", "")), favorite=True)
+            except Exception as e:
+                log(f"upload to the favorites failed: {e}")
+                return self.send_error(400, "could not use that image")
+            return self.send(json.dumps(favorites()).encode(), "application/json")
+        elif (m := re.fullmatch(r"/favorites/([^/]+)/show", path)) and self.favorite_exists(m[1]):
+            try:
+                show_favorite(m[1])
+            except Exception as e:
+                log(f"putting a favorite back failed: {e}")
+                return self.send_error(500, "could not put that one back")
         else:
             return self.send_error(404)
         open(PENDING, "w").close()
         self.send(json.dumps(status()).encode(), "application/json")
+
+    def do_DELETE(self):
+        m = re.fullmatch(r"/favorites/([^/]+)", self.path.split("?")[0])
+        if not (m and self.favorite_exists(m[1])):
+            return self.send_error(404)
+        forget_favorite(m[1])
+        self.send(json.dumps(status()).encode(), "application/json")
+
+    def favorite_exists(self, fid):
+        # the id goes into a path, so it has to look like one of ours
+        return bool(FAVORITE_ID.fullmatch(fid)) and os.path.isdir(os.path.join(FAVORITES, fid))
 
     def pending(self):
         """The board's check. It answers the seconds to sleep, 0 means fetch /today.png now."""
@@ -471,11 +613,11 @@ class Handler(BaseHTTPRequestHandler):
         log(f"battery {percent(volts)}% ({volts:.2f}V)")
         self.send(b"ok", "text/plain")
 
-    def send(self, body, kind):
+    def send(self, body, kind, cache=False):
         self.send_response(200)
         self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", "max-age=31536000, immutable" if cache else "no-store")
         self.end_headers()
         self.wfile.write(body)
 
