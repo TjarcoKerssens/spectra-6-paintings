@@ -79,6 +79,7 @@ func knobs() []knob {
 		numKnob("chroma boost", 0.1, 0, 3, func(p *e6.Params) *float64 { return &p.Sat }),
 		numKnob("boost ceiling", 0.1, 1, 3, func(p *e6.Params) *float64 { return &p.MaxGain }),
 		numKnob("vivid", 0.05, 0, 2, func(p *e6.Params) *float64 { return &p.Vivid }),
+		numKnob("light colour", 0.05, 0, 1.5, func(p *e6.Params) *float64 { return &p.Light }),
 		numKnob("chroma pct", 1, 50, 100, func(p *e6.Params) *float64 { return &p.TargetPct }),
 		numKnob("unsharp", 0.1, 0, 3, func(p *e6.Params) *float64 { return &p.Sharp }),
 		{

@@ -166,6 +166,31 @@ func ApplyGains(f *Frame, gains []float64) {
 	})
 }
 
+// LightChroma adds chroma to light colours only, rising from half the panel's
+// white lightness up to its white.
+//
+// The panel makes a light colour by sprinkling a dark ink into its white, so a
+// pale tint dithers to almost all white and reads as washed out. A stronger push
+// up there buys enough ink to show the colour. Dark colours already print fine,
+// so they are left alone, as are near greys below the chroma knee.
+func LightChroma(f *Frame, p Palette, amount float64) {
+	if amount <= 0 {
+		return
+	}
+	lw := p.Lab()[White].L
+	f.each(func(px *[3]float64) {
+		c := LinearToOkLab(px[0], px[1], px[2])
+		ch := c.Chroma()
+		if ch <= ChromaFloor {
+			return
+		}
+		g := 1 + amount*smoothstep(0.5*lw, lw, c.L)*smoothstep(ChromaFloor, ChromaKnee, ch)
+		c.A *= g
+		c.B *= g
+		*px = OkLabToLinear(c)
+	})
+}
+
 // smoothCircular runs a weighted three tap blur around the hue circle, so
 // neighbouring hues cannot end up with wildly different gains and shear against
 // each other across a gradient.

@@ -26,6 +26,7 @@ Run `spectra6 -h` for the same list straight from the binary; this is that list 
 | `-sat` | `1` | scales the automatic per-hue colour boost; `0` disables it |
 | `-max-gain` | `1.6` | ceiling on how much any one hue can be boosted |
 | `-vivid` | `1.15` | extra chroma on every colour after tone compression, near greys excepted; `1` disables it |
+| `-light` | `0.35` | extra chroma for light colours only, rising toward panel white; `0` disables it |
 | `-target` | `90` | chroma percentile aimed at the gamut edge |
 | `-sharp` | `0.6` | unsharp amount; `0` disables it |
 

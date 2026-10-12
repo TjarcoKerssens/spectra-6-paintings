@@ -559,3 +559,21 @@ func TestAutoToneBringsHighKeyImagesIntoRange(t *testing.T) {
 		t.Fatalf("mid pixel stayed above panel white, %.3f > %.3f", y, white)
 	}
 }
+
+func TestLightChromaLeavesDarkColoursAlone(t *testing.T) {
+	f := NewFrame(2, 1)
+	f.Px[0] = OkLabToLinear(OkLab{L: 0.30, A: 0.05, B: 0.05})
+	f.Px[1] = OkLabToLinear(OkLab{L: Measured.Lab()[White].L, A: 0.05, B: 0.05})
+	before := append([][3]float64(nil), f.Px...)
+	LightChroma(f, Measured, 0.5)
+	for c := 0; c < 3; c++ {
+		if math.Abs(f.Px[0][c]-before[0][c]) > 1e-6 {
+			t.Fatalf("dark colour changed: %v -> %v", before[0], f.Px[0])
+		}
+	}
+	lo := LinearToOkLab(before[1][0], before[1][1], before[1][2]).Chroma()
+	hi := LinearToOkLab(f.Px[1][0], f.Px[1][1], f.Px[1][2]).Chroma()
+	if hi <= lo*1.2 {
+		t.Fatalf("light colour barely moved, chroma %.3f -> %.3f", lo, hi)
+	}
+}

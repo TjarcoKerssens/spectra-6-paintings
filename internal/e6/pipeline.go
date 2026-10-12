@@ -51,6 +51,7 @@ type Params struct {
 	Sat           float64  // scales the computed per hue boost, 0 disables it
 	MaxGain       float64  // ceiling on any one hue's boost
 	Vivid         float64  // flat chroma multiplier after tone compression, 1 leaves it
+	Light         float64  // extra chroma for colours near panel white, 0 leaves them
 	TargetPct     float64  // which chroma percentile is aimed at the gamut edge
 	Sharp         float64  // unsharp amount
 	Shadows       *float64 // nil means take the analyser's suggestion
@@ -71,6 +72,7 @@ func Defaults() Params {
 		Sat:        1.0,
 		MaxGain:    1.6,
 		Vivid:      1.15,
+		Light:      0.35,
 		TargetPct:  90,
 		Sharp:      0.6,
 		Tone:       Strength{Auto: true},
@@ -112,7 +114,7 @@ func AnalyseImage(fitted image.Image, p Palette, prm Params) ([]float64, Report)
 //
 // Order matters and it is the order the reference implementation settled on:
 // chroma shaping, then sharpening, then the tonal S curve, then dynamic range,
-// then the vivid push, then gamut, then dither. Chroma first because everything after it depends on
+// then the vivid and light colour pushes, then gamut, then dither. Chroma first because everything after it depends on
 // where the colours ended up. Gamut last because it is the safety net that
 // catches whatever the earlier steps pushed out of reach.
 func Convert(fitted image.Image, p Palette, prm Params, gains []float64, rep Report) Result {
@@ -148,6 +150,7 @@ func Convert(fitted image.Image, p Palette, prm Params, gains []float64, rep Rep
 			}
 			ApplyGains(f, vivid)
 		}
+		LightChroma(f, p, prm.Light)
 	}
 	switch {
 	case prm.Gamut.Auto:

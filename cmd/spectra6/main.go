@@ -52,6 +52,7 @@ type opts struct {
 	sat        float64
 	maxGain    float64
 	vivid      float64
+	light      float64
 	target     float64
 	sharp      float64
 	highlights float64
@@ -89,6 +90,7 @@ func run() error {
 	fs.Float64Var(&o.sat, "sat", 1, "scale the automatic per hue boost, 0 disables it")
 	fs.Float64Var(&o.maxGain, "max-gain", 1.6, "ceiling on any one hue's boost")
 	fs.Float64Var(&o.vivid, "vivid", 1.15, "extra chroma on top of the boost, 1 disables it")
+	fs.Float64Var(&o.light, "light", 0.35, "extra chroma for light colours, 0 disables it")
 	fs.Float64Var(&o.target, "target", 90, "chroma percentile aimed at the gamut edge")
 	fs.Float64Var(&o.sharp, "sharp", 0.6, "unsharp amount, 0 disables")
 	fs.BoolVar(&o.contain, "contain", false, "letterbox instead of crop")
@@ -188,7 +190,7 @@ func (o opts) params() (e6.Params, error) {
 	default:
 		return prm, fmt.Errorf("palette-out must be ideal or measured, got %q", o.paletteOut)
 	}
-	prm.Sat, prm.MaxGain, prm.TargetPct, prm.Vivid = o.sat, o.maxGain, o.target, o.vivid
+	prm.Sat, prm.MaxGain, prm.TargetPct, prm.Vivid, prm.Light = o.sat, o.maxGain, o.target, o.vivid, o.light
 	prm.Sharp, prm.Highlights = o.sharp, o.highlights
 	prm.Contain = o.contain
 	if prm.MaxGain < 1 {
@@ -196,6 +198,9 @@ func (o opts) params() (e6.Params, error) {
 	}
 	if prm.Vivid < 0 {
 		return prm, fmt.Errorf("vivid must not be negative, got %g", prm.Vivid)
+	}
+	if prm.Light < 0 {
+		return prm, fmt.Errorf("light must not be negative, got %g", prm.Light)
 	}
 	if prm.TargetPct <= 0 || prm.TargetPct > 100 {
 		return prm, fmt.Errorf("target must be a percentile between 0 and 100, got %g", prm.TargetPct)
