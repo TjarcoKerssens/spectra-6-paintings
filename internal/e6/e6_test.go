@@ -577,3 +577,20 @@ func TestLightChromaLeavesDarkColoursAlone(t *testing.T) {
 		t.Fatalf("light colour barely moved, chroma %.3f -> %.3f", lo, hi)
 	}
 }
+
+// Regression: a light orange has no ink mix at its lightness, and used to
+// print as yellow. The clip has to keep it orange, darker if need be.
+func TestHueClipKeepsLightOrangeOrange(t *testing.T) {
+	src := LinearToOkLab(SRGBToLinear(248.0/255), SRGBToLinear(192.0/255), SRGBToLinear(118.0/255))
+	src.L = Measured.Lab()[White].L
+	f := NewFrame(1, 1)
+	f.Px[0] = OkLabToLinear(src)
+	HueClip(f, Measured, 0.4)
+	got := LinearToOkLab(f.Px[0][0], f.Px[0][1], f.Px[0][2])
+	if d := math.Abs(angleDiff(got.Hue(), src.Hue())); d > 0.05 {
+		t.Fatalf("hue moved by %.3f rad", d)
+	}
+	if got.Chroma() < 0.5*src.Chroma() {
+		t.Fatalf("chroma collapsed, %.3f -> %.3f", src.Chroma(), got.Chroma())
+	}
+}

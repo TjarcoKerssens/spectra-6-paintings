@@ -155,3 +155,123 @@ func nearestOnSegment(p, a, b OkLab) float64 {
 	dot := (p.L-a.L)*ex + (p.A-a.A)*ey + (p.B-a.B)*ez
 	return clamp(dot/lenSq, 0, 1)
 }
+
+// hullPlane is one face of the palette's convex hull in OkLab, as n·x <= d.
+type hullPlane struct {
+	n [3]float64
+	d float64
+}
+
+// hullPlanes finds the faces of the palette hull by brute force. With six inks
+// that is twenty triples, cheap enough to do on every call.
+func hullPlanes(lab []OkLab) []hullPlane {
+	pts := make([][3]float64, len(lab))
+	for i, c := range lab {
+		pts[i] = [3]float64{c.L, c.A, c.B}
+	}
+	sub := func(a, b [3]float64) [3]float64 { return [3]float64{a[0] - b[0], a[1] - b[1], a[2] - b[2]} }
+	dot := func(a, b [3]float64) float64 { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2] }
+	var out []hullPlane
+	for i := 0; i < len(pts); i++ {
+		for j := i + 1; j < len(pts); j++ {
+			for k := j + 1; k < len(pts); k++ {
+				u, v := sub(pts[j], pts[i]), sub(pts[k], pts[i])
+				n := [3]float64{u[1]*v[2] - u[2]*v[1], u[2]*v[0] - u[0]*v[2], u[0]*v[1] - u[1]*v[0]}
+				if dot(n, n) < 1e-12 {
+					continue
+				}
+				d := dot(n, pts[i])
+				above, below := false, false
+				for m, q := range pts {
+					if m == i || m == j || m == k {
+						continue
+					}
+					s := dot(n, q) - d
+					above = above || s > 1e-9
+					below = below || s < -1e-9
+				}
+				switch {
+				case above && below:
+					continue
+				case above:
+					n, d = [3]float64{-n[0], -n[1], -n[2]}, -d
+				}
+				out = append(out, hullPlane{n, d})
+			}
+		}
+	}
+	return out
+}
+
+// HueClip brings colours the panel cannot make back onto the palette hull
+// along their own hue, letting lightness give way before chroma does.
+//
+// A light orange has no matching ink mix, since the only red is dark. Left as
+// it is, the dither keeps its lightness and gives up its hue, and it prints as
+// yellow. Here the nearest reachable colour of the same hue is found with
+// lightness weighted at wl, so below 1 it prefers a darker colour that keeps
+// its chroma over a paler one that keeps its brightness.
+//
+// The hull is sliced once per hue bin and lightness step into a table of the
+// largest reachable chroma, so the per pixel work is a short scan.
+func HueClip(f *Frame, p Palette, wl float64) {
+	lab := p.Lab()
+	planes := hullPlanes(lab)
+	if len(planes) == 0 {
+		return
+	}
+	inside := func(L, a, b float64) bool {
+		for _, h := range planes {
+			if h.n[0]*L+h.n[1]*a+h.n[2]*b > h.d+1e-9 {
+				return false
+			}
+		}
+		return true
+	}
+	const hues, steps = 180, 64
+	lo, hi := lab[Black].L, lab[White].L
+	levelL := func(j int) float64 { return lo + (hi-lo)*float64(j)/float64(steps-1) }
+	var reach [hues][steps]float64
+	for i := 0; i < hues; i++ {
+		h := (float64(i)+0.5)/hues*2*math.Pi - math.Pi
+		ca, sa := math.Cos(h), math.Sin(h)
+		for j := 0; j < steps; j++ {
+			L := levelL(j)
+			if !inside(L, 0, 0) {
+				continue
+			}
+			a, b := 0.0, 0.5
+			for k := 0; k < 16; k++ {
+				m := (a + b) / 2
+				if inside(L, m*ca, m*sa) {
+					a = m
+				} else {
+					b = m
+				}
+			}
+			reach[i][j] = a
+		}
+	}
+	f.each(func(px *[3]float64) {
+		c := LinearToOkLab(px[0], px[1], px[2])
+		ch := c.Chroma()
+		if ch <= ChromaFloor || inside(c.L, c.A, c.B) {
+			return
+		}
+		i := clampInt(int((c.Hue()+math.Pi)/(2*math.Pi)*hues), 0, hues-1)
+		bestL, bestC, best := c.L, 0.0, math.Inf(1)
+		for j := 0; j < steps; j++ {
+			L := levelL(j)
+			C := math.Min(ch, reach[i][j])
+			dl, dc := (c.L-L)*wl, ch-C
+			if d := dl*dl + dc*dc; d < best {
+				best, bestL, bestC = d, L, C
+			}
+		}
+		s := bestC / ch
+		out := OkLabToLinear(OkLab{L: bestL, A: c.A * s, B: c.B * s})
+		for k := 0; k < 3; k++ {
+			px[k] = clamp(out[k], 0, 1)
+		}
+	})
+}
